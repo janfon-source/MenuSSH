@@ -32,6 +32,21 @@ struct TransferProgress {
     var transferred: String
     var rate: String
     var eta: String
+
+    /// `transferred` in bytes: sftp writes 512, 1024KB, 1.5MB and the like (powers of 1024),
+    /// rounded, which is close enough to count progress by.
+    var bytes: Int64 {
+        let text = transferred.uppercased()
+        let number = Double(text.prefix { $0.isNumber || $0 == "." }) ?? 0
+        let units: [(String, Double)] = [("TB", 1_099_511_627_776), ("GB", 1_073_741_824), ("MB", 1_048_576), ("KB", 1024)]
+        let scale = units.first { text.hasSuffix($0.0) }?.1 ?? 1
+        return Int64(number * scale)
+    }
+
+    /// `rate` (1.2MB/s) in bytes a second.
+    var rateBytes: Int64 {
+        TransferProgress(file: "", percent: 0, transferred: rate.replacingOccurrences(of: "/s", with: ""), rate: "", eta: "").bytes
+    }
 }
 
 /// Something running that Cancel can stop: the ssh, sftp or script process doing the work.
@@ -110,9 +125,34 @@ final class SSHConnection {
 
     // MARK: Connecting
 
+    /// When the shared connection was last known to be up. Each sftp or ssh rides on it, so
+    /// asking again before each one (a process started, every time) is skipped for a few seconds.
+    private var confirmed = Date.distantPast
+    private let confirmedLock = NSLock()
+    private static let trustFor: TimeInterval = 10
+
     /// Whether the shared connection is up (asks it over its socket; nothing goes to the server).
     var isConnected: Bool {
-        (try? Self.run("/usr/bin/ssh", options + ["-O", "check", destination], timeout: 5).status) == 0
+        confirmedLock.lock()
+        let recent = Date().timeIntervalSince(confirmed) < Self.trustFor
+        confirmedLock.unlock()
+        if recent { return true }
+        let up = (try? Self.run("/usr/bin/ssh", options + ["-O", "check", destination], timeout: 5).status) == 0
+        if up { markConnected() }
+        return up
+    }
+
+    /// Without asking: whether it was up a moment ago, for the window to decide what to say.
+    var seemsConnected: Bool {
+        confirmedLock.lock()
+        defer { confirmedLock.unlock() }
+        return Date().timeIntervalSince(confirmed) < Self.trustFor
+    }
+
+    private func markConnected(_ up: Bool = true) {
+        confirmedLock.lock()
+        confirmed = up ? Date() : .distantPast
+        confirmedLock.unlock()
     }
 
     /// Makes the shared connection, unless it's up already. ssh asks for a password, a key's
@@ -135,11 +175,13 @@ final class SSHConnection {
         }
         if cancellation.isCancelled { throw SSHError.cancelled }
         guard result.status == 0 else { throw SSHError(message: Self.cleanError(result.error, status: result.status)) }
+        markConnected()
     }
 
     /// Stops the shared connection taking anything new; it ends once the Terminal windows riding
     /// on it close, which aren't cut off.
     func stop() {
+        markConnected(false)
         _ = try? Self.run("/usr/bin/ssh", options + ["-O", "stop", destination], timeout: 5)
     }
 
@@ -160,6 +202,7 @@ final class SSHConnection {
 
     /// Closes the shared connection, and with it any Terminal window riding on it.
     func disconnect() {
+        markConnected(false)
         _ = try? Self.run("/usr/bin/ssh", options + ["-O", "exit", destination], timeout: 5)
     }
 
@@ -173,7 +216,10 @@ final class SSHConnection {
                                   input: commands.joined(separator: "\n") + "\n",
                                   environment: Self.utf8Environment, timeout: 120, cancellation: cancellation)
         if cancellation.isCancelled { throw SSHError.cancelled }
-        guard result.status == 0 else { throw SSHError(message: Self.cleanError(result.error, status: result.status)) }
+        guard result.status == 0 else {
+            markConnected(false)
+            throw SSHError(message: Self.cleanError(result.error, status: result.status))
+        }
         return result.output
     }
 
@@ -194,6 +240,31 @@ final class SSHConnection {
             }
         }
         return (folder, files)
+    }
+
+    /// How many bytes a folder on the server holds, for a download's progress: `du` in KB, by the
+    /// files' sizes rather than the disk they take (they differ for sparse files): GNU's
+    /// --apparent-size, else BSD's -A, else plain. Nil where it can't be told (no shell, say).
+    func size(of path: String, _ cancellation: Cancellation) -> Int64? {
+        let p = Self.shellQuote(path)
+        let command = "du -sk --apparent-size \(p) 2>/dev/null || du -skA \(p) 2>/dev/null || du -sk \(p) 2>/dev/null"
+        guard let output = try? shell(command, cancellation),
+              let kb = Int64(output.split(whereSeparator: \.isWhitespace).first ?? "") else { return nil }
+        return kb * 1024
+    }
+
+    /// How many bytes a file or folder on this Mac holds, for an upload's progress.
+    static func localSize(of url: URL) -> Int64 {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return 0 }
+        guard info.st_mode & S_IFMT == S_IFDIR else { return Int64(info.st_size) }
+        var total: Int64 = 0
+        let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+        while let item = enumerator?.nextObject() as? URL {
+            let values = try? item.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            if values?.isRegularFile == true { total += Int64(values?.fileSize ?? 0) }
+        }
+        return total
     }
 
     /// Whether `path` is a folder: cd into it works.
@@ -243,7 +314,10 @@ final class SSHConnection {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        process.arguments = ["-q", "/dev/null", "/usr/bin/sftp", "-b", batch.path] + options + [destination]
+        // 255 KB reads and writes with 64 of them under way at once (sftp's defaults are 32 KB and
+        // 64), so a link far away keeps busy. Not a full 256 KB: a write that size plus its header
+        // is over the protocol's packet limit ("Outbound message too long").
+        process.arguments = ["-q", "/dev/null", "/usr/bin/sftp", "-B", "261120", "-R", "64", "-b", batch.path] + options + [destination]
         process.environment = Self.utf8Environment
         process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
@@ -276,9 +350,11 @@ final class SSHConnection {
         consume(pipe.fileHandleForReading.readDataToEndOfFile())
         if cancellation.isCancelled { throw SSHError.cancelled }
         guard process.terminationStatus == 0 else {
+            markConnected(false)
             lock.lock()
             let said = (messages + [text]).map { $0.replacingOccurrences(of: "^D\u{8}\u{8}", with: "") }
-                .filter { !$0.hasPrefix("sftp> ") && !$0.hasPrefix("Progress meter") }
+                .filter { !$0.hasPrefix("sftp> ") && !$0.hasPrefix("Progress meter") && !$0.hasPrefix("Entering ")
+                    && !$0.hasPrefix("Retrieving ") && !$0.hasPrefix("Uploading ") && !$0.hasPrefix("Fetching ") }
             lock.unlock()
             throw SSHError(message: Self.cleanError(said.joined(separator: "\n"), status: process.terminationStatus))
         }
@@ -423,16 +499,24 @@ final class SSHConnection {
         process.standardError = try FileHandle(forWritingTo: errURL)
         guard cancellation.attach(process) else { throw SSHError.cancelled }
         defer { _ = cancellation.attach(nil) }
+        // Told when it ends, rather than looking every so often; while connecting, the questions
+        // ssh leaves are looked for every 50 ms meanwhile.
+        let ended = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in ended.signal() }
         try process.run()
         let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning {
-            if Date() > deadline {
-                process.terminate()
-                throw SSHError(message: tr("伺服器沒有回應（超過 \(Int(timeout)) 秒）。",
-                                           "The server didn’t answer within \(Int(timeout)) seconds."))
+        func timedOut() -> SSHError {
+            process.terminate()
+            return SSHError(message: tr("伺服器沒有回應（超過 \(Int(timeout)) 秒）。",
+                                        "The server didn’t answer within \(Int(timeout)) seconds."))
+        }
+        if let whileRunning {
+            while ended.wait(timeout: .now() + 0.05) == .timedOut {
+                if Date() > deadline { throw timedOut() }
+                whileRunning()
             }
-            whileRunning?()
-            Thread.sleep(forTimeInterval: 0.05)
+        } else if ended.wait(timeout: .now() + timeout) == .timedOut {
+            throw timedOut()
         }
         return Result(status: process.terminationStatus,
                       output: String(decoding: (try? Data(contentsOf: outURL)) ?? Data(), as: UTF8.self),

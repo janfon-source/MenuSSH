@@ -1332,7 +1332,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             return TransferItem(name: file.name, direction: .download, connection: connection,
                                 commands: ["get " + SSHConnection.quote(file.path) + " " + SSHConnection.quote(url.path)],
-                                destination: tr("開啟", "Open")) { [weak self] error in
+                                destination: tr("開啟", "Open"), measure: { _ in file.size }) { [weak self] error in
                 guard let self, error == nil else { return }
                 let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
                 self.editedFiles[url] = EditedFile(connection: connection, remotePath: file.path, modified: modified)
@@ -1355,7 +1355,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             transferQueue.add([TransferItem(name: name, direction: .upload, connection: edited.connection,
                                             commands: ["put " + SSHConnection.quote(url.path) + " " + SSHConnection.quote(edited.remotePath)],
                                             destination: edited.connection.destination + ":" + SSHConnection.parent(of: edited.remotePath),
-                                            refresh: SSHConnection.parent(of: edited.remotePath)) { [weak self] error in
+                                            refresh: SSHConnection.parent(of: edited.remotePath),
+                                            measure: { _ in SSHConnection.localSize(of: url) }) { [weak self] error in
                 if error == nil { self?.statusLabel.stringValue = tr("已上傳 \(name) 的修改", "Uploaded the changes to \(name)") }
             }])
         }
@@ -1383,20 +1384,30 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     /// The footer's summary: the transfer under way, how far it's got, and how many wait.
     private func showTransfer() {
         let running = transferQueue.running
-        transferBar.isHidden = running == nil
-        transferStop.isHidden = running == nil
-        transferLabel.isHidden = running == nil
+        transferBar.isHidden = running.isEmpty
+        transferStop.isHidden = running.isEmpty
+        transferLabel.isHidden = running.isEmpty
         transfersButton.isHidden = transferQueue.items.isEmpty
-        guard let running else { return }
-        var text = (running.direction == .upload ? "↑ " : "↓ ") + running.name
-        if let progress = running.progress {
-            text += " · \(progress.percent)% · \(progress.rate)"
+        guard let first = running.first else { return }
+        // Several at once: the first named, with how many more; the bar for all of them together
+        // when their sizes are known.
+        var text = (first.direction == .upload ? "↑ " : "↓ ") + first.name
+        if running.count > 1 { text += tr(" 等 \(running.count) 項", " and \(running.count - 1) more") }
+        let totals = running.compactMap(\.totalBytes)
+        if totals.count == running.count, totals.reduce(0, +) > 0 {
+            let percent = Int(min(100, running.map(\.transferredBytes).reduce(0, +) * 100 / totals.reduce(0, +)))
+            text += " · \(percent)%"
             transferBar.isIndeterminate = false
-            transferBar.doubleValue = Double(progress.percent)
+            transferBar.doubleValue = Double(percent)
+        } else if let percent = first.percent {
+            text += " · \(percent)%"
+            transferBar.isIndeterminate = false
+            transferBar.doubleValue = Double(percent)
         } else {
             transferBar.isIndeterminate = true
             transferBar.startAnimation(nil)
         }
+        if let rate = first.progress?.rate, running.count == 1 { text += " · " + rate }
         let waiting = transferQueue.waitingCount
         if waiting > 0 { text += tr("（還有 \(waiting) 項排隊）", " (\(waiting) waiting)") }
         transferLabel.stringValue = text
@@ -1451,7 +1462,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             let name = url.lastPathComponent
             return TransferItem(name: name, direction: .upload, connection: connection,
                                 commands: ["put -r " + SSHConnection.quote(url.path) + " " + SSHConnection.quote(SSHConnection.join(remoteFolder, name))],
-                                destination: connection.destination + ":" + remoteFolder, refresh: remoteFolder) { [weak self] error in
+                                destination: connection.destination + ":" + remoteFolder, refresh: remoteFolder,
+                                measure: { _ in SSHConnection.localSize(of: url) }) { [weak self] error in
                 guard error == nil, let self, remoteFolder == self.folder, connection === self.connection, !self.busyOverlay.isShowing else { return }
                 self.load(remoteFolder, select: self.selectedFiles.map(\.name) + [name], quietly: true)
             }
@@ -1501,7 +1513,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             taken.insert(target.lastPathComponent)
             return TransferItem(name: file.name, direction: .download, connection: connection,
                                 commands: ["get -r " + SSHConnection.quote(file.path) + " " + SSHConnection.quote(target.path)],
-                                destination: (localFolder.path as NSString).abbreviatingWithTildeInPath, localURL: target) { error in
+                                destination: (localFolder.path as NSString).abbreviatingWithTildeInPath, localURL: target,
+                                measure: { cancel in file.isFolder ? connection.size(of: file.path, cancel) : file.size }) { error in
                 guard error == nil else { return }
                 // The Downloads stack in the Dock bounces, as it does for Safari's downloads.
                 DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: target.path)

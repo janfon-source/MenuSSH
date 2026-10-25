@@ -95,12 +95,40 @@ final class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations 
         needsDisplay = true
     }
 
-    /// New output: keeps a view scrolled into the past looking at the same lines.
+    /// What each row of the screen held when last drawn, and where the cursor was, so new output
+    /// redraws only the rows it changed.
+    private var drawnRows: [Int] = []
+    private var drawnCursor = (x: -1, y: -1, visible: false)
+
+    /// New output: keeps a view scrolled into the past looking at the same lines, and redraws
+    /// the rows that changed (and the cursor's old and new places), not the whole screen.
     func outputArrived() {
         let total = emulator.dropped + emulator.history.count
         if scrollOffset > 0 { scrollOffset = min(scrollOffset + total - lastTotal, emulator.history.count) }
         lastTotal = total
-        needsDisplay = true
+        // Scrolled into the past, or composing with an input method: all of it.
+        guard scrollOffset == 0, marked.isEmpty else {
+            drawnRows = []
+            needsDisplay = true
+            return
+        }
+        let rows = emulator.lines.map { $0.cells.hashValue }
+        let cursor = (x: emulator.cursorX, y: emulator.cursorY, visible: emulator.cursorVisible)
+        if rows.count != drawnRows.count {
+            needsDisplay = true
+        } else {
+            for row in rows.indices where rows[row] != drawnRows[row] { setNeedsDisplay(rowRect(row)) }
+            if cursor != drawnCursor {
+                if drawnCursor.y >= 0, drawnCursor.y < rows.count { setNeedsDisplay(rowRect(drawnCursor.y)) }
+                setNeedsDisplay(rowRect(cursor.y))
+            }
+        }
+        drawnRows = rows
+        drawnCursor = cursor
+    }
+
+    private func rowRect(_ row: Int) -> NSRect {
+        NSRect(x: 0, y: Self.padding + CGFloat(row) * cellHeight - 1, width: bounds.width, height: cellHeight + 2)
     }
 
     // MARK: Colors

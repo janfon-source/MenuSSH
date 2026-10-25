@@ -1,7 +1,7 @@
 import Foundation
 
 /// How a character is drawn: colors and SGR flags.
-struct TermAttr: Equatable {
+struct TermAttr: Hashable {
     static let bold: UInt8 = 1, dim: UInt8 = 2, italic: UInt8 = 4, underline: UInt8 = 8,
                inverse: UInt8 = 16, hidden: UInt8 = 32, strike: UInt8 = 64
 
@@ -15,7 +15,7 @@ struct TermAttr: Equatable {
     func has(_ flag: UInt8) -> Bool { flags & flag != 0 }
 }
 
-struct TermCell: Equatable {
+struct TermCell: Hashable {
     /// The character, as a Unicode scalar value; a space when empty.
     var ch: UInt32 = 32
     /// 1 for most characters; 2 for the left half of a wide one (CJK, emoji), 0 for its right half.

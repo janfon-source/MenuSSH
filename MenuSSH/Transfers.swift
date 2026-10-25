@@ -18,6 +18,14 @@ final class TransferItem {
     /// Called on the main thread once it's finished, failed or been cancelled.
     var done: ((Error?) -> Void)?
 
+    /// Finds how many bytes it all comes to (a folder on this Mac walked, one on the server
+    /// asked with du), off the main thread just before it starts; nil where that can't be told.
+    var measure: ((Cancellation) -> Int64?)?
+    fileprivate(set) var totalBytes: Int64?
+    /// The files finished so far (a folder goes a file at a time), and the one under way.
+    fileprivate var doneBytes: Int64 = 0
+    fileprivate var currentFile = ""
+
     fileprivate(set) var state = State.waiting
     fileprivate(set) var progress: TransferProgress?
     fileprivate(set) var started: Date?
@@ -25,7 +33,8 @@ final class TransferItem {
     fileprivate var cancellation = Cancellation()
 
     init(name: String, direction: Direction, connection: SSHConnection, commands: [String], destination: String,
-         localURL: URL? = nil, refresh: String? = nil, done: ((Error?) -> Void)? = nil) {
+         localURL: URL? = nil, refresh: String? = nil, measure: ((Cancellation) -> Int64?)? = nil,
+         done: ((Error?) -> Void)? = nil) {
         self.name = name
         self.direction = direction
         self.connection = connection
@@ -33,21 +42,49 @@ final class TransferItem {
         self.destination = destination
         self.localURL = localURL
         self.refresh = refresh
+        self.measure = measure
         self.done = done
     }
 
     var isActive: Bool { state == .waiting || state == .running }
+
+    /// How far it's got, all files counted.
+    var transferredBytes: Int64 { doneBytes + (progress?.bytes ?? 0) }
+
+    /// The whole transfer's percent, when its size is known; else the file under way's.
+    var percent: Int? {
+        if state == .done { return 100 }
+        if let total = totalBytes, total > 0 { return Int(min(100, transferredBytes * 100 / total)) }
+        return progress?.percent
+    }
+
+    /// Time left for all of it, from the speed now; sftp's own estimate is for the file under way.
+    var secondsLeft: Int? {
+        guard let total = totalBytes, total > 0, let rate = progress?.rateBytes, rate > 0 else { return nil }
+        return Int(max(0, total - transferredBytes) / rate)
+    }
+
+    fileprivate func record(_ new: TransferProgress) {
+        // A new file's meter: the one before it is finished.
+        if !currentFile.isEmpty, new.file != currentFile, let last = progress { doneBytes += last.bytes }
+        currentFile = new.file
+        progress = new
+    }
 }
 
-/// Runs transfers one after another, off the main thread, and says when any of them changes.
+/// Runs transfers off the main thread, a few at once (each its own sftp, all riding the server's
+/// one shared connection), in the order they were added, and says when any of them changes.
 final class TransferQueue {
     private(set) var items: [TransferItem] = []
     /// The list changed (nil), or one item in it did.
     var onChange: ((TransferItem?) -> Void)?
     /// A transfer failed (not one that was cancelled).
     var onFailure: ((TransferItem, String) -> Void)?
-    private let queue = DispatchQueue(label: "menussh.transfers")
-    private(set) var running: TransferItem?
+    private let queue = DispatchQueue(label: "menussh.transfers", attributes: .concurrent)
+    /// How many go at once: enough to keep a link busy with many small files, few enough not to
+    /// crowd one big one.
+    static let concurrent = 3
+    private(set) var running: [TransferItem] = []
 
     var waitingCount: Int { items.filter { $0.state == .waiting }.count }
     var hasActive: Bool { items.contains(where: \.isActive) }
@@ -74,7 +111,7 @@ final class TransferQueue {
 
     func cancelAll() {
         for item in items where item.state == .waiting { cancel(item) }
-        if let running { cancel(running) }
+        for item in running { cancel(item) }
     }
 
     /// Puts a failed or cancelled transfer back at the end of the queue.
@@ -82,6 +119,8 @@ final class TransferQueue {
         guard !item.isActive else { return }
         item.state = .waiting
         item.progress = nil
+        item.doneBytes = 0
+        item.currentFile = ""
         item.started = nil
         item.finished = nil
         item.cancellation = Cancellation()
@@ -97,17 +136,26 @@ final class TransferQueue {
     }
 
     private func startNext() {
-        guard running == nil, let item = items.first(where: { $0.state == .waiting }) else { return }
-        running = item
+        while running.count < Self.concurrent, let item = items.first(where: { $0.state == .waiting }) {
+            start(item)
+        }
+    }
+
+    private func start(_ item: TransferItem) {
+        running.append(item)
         item.state = .running
         item.started = Date()
         onChange?(item)
         queue.async { [weak self] in
+            if item.totalBytes == nil, let measure = item.measure {
+                let total = measure(item.cancellation)
+                DispatchQueue.main.async { item.totalBytes = total }
+            }
             var failure: Error?
             do {
                 try item.connection.transfer(item.commands, item.cancellation) { progress in
                     DispatchQueue.main.async {
-                        item.progress = progress
+                        item.record(progress)
                         self?.onChange?(item)
                     }
                 }
@@ -124,7 +172,7 @@ final class TransferQueue {
                 } else {
                     item.state = .done
                 }
-                self.running = nil
+                self.running.removeAll { $0 === item }
                 item.done?(failure)
                 self.onChange?(item)
                 self.startNext()
@@ -259,9 +307,9 @@ final class TransfersView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         bar.widthAnchor.constraint(equalToConstant: 120).isActive = true
         switch item.state {
         case .running:
-            if let progress = item.progress {
+            if let percent = item.percent {
                 bar.isIndeterminate = false
-                bar.doubleValue = Double(progress.percent)
+                bar.doubleValue = Double(percent)
             } else {
                 bar.isIndeterminate = true
                 bar.startAnimation(nil)
@@ -309,18 +357,32 @@ final class TransfersView: NSView, NSTableViewDataSource, NSTableViewDelegate {
             return tr("排隊中", "Waiting") + " · " + arrow
         case .running:
             guard let p = item.progress else { return tr("開始中…", "Starting…") + " · " + arrow }
-            // A folder goes a file at a time: say which.
+            // The whole of it when its size is known: percent, how much of how much, speed, time left.
+            if let total = item.totalBytes, total > 0 {
+                let size = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+                let left = item.secondsLeft.map { " · " + tr("剩餘 ", "") + Self.duration($0) + tr("", " left") } ?? ""
+                // A folder goes a file at a time: say which.
+                let file = p.file.isEmpty || p.file == item.name ? "" : " · " + p.file
+                return "\(item.percent ?? 0)% · \(size(item.transferredBytes)) / \(size(total)) · \(p.rate)" + left + file
+            }
             let file = p.file.isEmpty || p.file == item.name ? "" : p.file + " · "
             return file + "\(p.percent)% · \(p.transferred) · \(p.rate) · " + tr("剩餘 \(p.eta)", "\(p.eta) left")
         case .done:
             let seconds = max(0, Int((item.finished ?? Date()).timeIntervalSince(item.started ?? Date())))
-            return tr("完成", "Done") + (item.progress.map { " · " + $0.transferred } ?? "")
+            let amount = item.totalBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? item.progress?.transferred
+            return tr("完成", "Done") + (amount.map { " · " + $0 } ?? "")
                 + " · " + tr("\(seconds) 秒", "\(seconds) s") + " · " + arrow
         case .failed(let message):
             return tr("失敗：", "Failed: ") + message.replacingOccurrences(of: "\n", with: " ")
         case .cancelled:
             return tr("已取消", "Cancelled") + " · " + arrow
         }
+    }
+
+    /// 0:42, 3:05, 1:02:30.
+    static func duration(_ seconds: Int) -> String {
+        let h = seconds / 3600, m = seconds / 60 % 60, s = seconds % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     @objc private func rowButton(_ sender: NSButton) {
