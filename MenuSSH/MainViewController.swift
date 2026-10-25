@@ -93,7 +93,12 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private let fileTable = FileTable()
     /// The server showing, which drops down every host to connect to, and what can be done with it.
     private var hostButton: NSButton!
-    private var stopButton: NSButton!
+    /// The tabs: this Mac's first, then a server's for each one opened, by host name, in the order shown.
+    private let tabStrip = NSStackView()
+    private var tabHosts: [String] = []
+    /// What each server's tab was showing when another was picked, to show again when it's back.
+    private var tabModes: [String: Mode] = [:]
+    private var tabFolders: [String: String] = [:]
     /// Servers connected in this window (and not closed since), for the dots in the host menu.
     private var openedKeys: Set<String> = []
     private let pathField = NSTextField()
@@ -151,9 +156,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         hiddenButton = toolButton("eye.slash", "顯示或隱藏以 . 開頭的隱藏檔（⇧⌘.）", "Show or Hide Hidden Files, Whose Names Start with . (⇧⌘.)",
                                   #selector(toggleHidden(_:)))
         hostButton = toolButton("server.rack", "選擇連線", "Choose a Connection", #selector(showHostMenu(_:)))
-        stopButton = toolButton("stop.circle", "停止連線：關閉這台主機的連線（⌥⌘D）；之後在終端機按 Return 可重新連線",
-                                "Stop the Connection: close the connection to this host (⌥⌘D); press Return in the terminal to connect again",
-                                #selector(stopConnection(_:)))
         externalTerminalButton = toolButton("macwindow.on.rectangle", "在外部的終端機 App 開啟 SSH 連線（⌘T）",
                                             "Open an SSH Session in the Terminal App (⌘T)", #selector(openTerminalHere(_:)))
         reconnectButton = toolButton("arrow.triangle.2.circlepath", "重新連線：結束這個 SSH 連線，再開一個新的（⇧⌘R）",
@@ -183,7 +185,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         fileDividers = [divider()]
-        var items: [NSView] = [hostButton, stopButton, divider(), modeControl, divider(), externalTerminalButton, reconnectButton]
+        var items: [NSView] = [hostButton, divider(), modeControl, divider(), externalTerminalButton, reconnectButton]
         items.append(fileDividers[0])
         items += serverButtons.map { $0 as NSView }
         items.append(spacer)
@@ -204,7 +206,10 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         pathField.target = self
         pathField.action = #selector(goToTypedPath(_:))
         pathField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let header = NSStackView(views: [toolbar])
+        tabStrip.spacing = 4
+        tabStrip.setHuggingPriority(.required, for: .vertical)
+        tabStrip.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        let header = NSStackView(views: [toolbar, tabStrip])
         header.orientation = .vertical
         header.alignment = .leading
         header.spacing = 6
@@ -232,6 +237,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             column.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             header.widthAnchor.constraint(equalTo: column.widthAnchor),
             toolbar.widthAnchor.constraint(equalTo: header.widthAnchor, constant: -20),
+            tabStrip.widthAnchor.constraint(equalTo: header.widthAnchor, constant: -20),
             rightPane.widthAnchor.constraint(equalTo: column.widthAnchor),
             footer.widthAnchor.constraint(equalTo: column.widthAnchor),
         ])
@@ -264,6 +270,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         applyLanguage()
         // This Mac and the server get half each, once the window has its size.
         DispatchQueue.main.async { self.dualSplit.setPosition(self.dualSplit.bounds.width / 2, ofDividerAt: 0) }
+        rebuildTabs()
         showMode()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.uploadEditedFiles() }
     }
@@ -283,6 +290,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     /// Where a server's files start: the folder set for it, or else the last one seen there. One
     /// under the home folder (~/site) is given as a path from it, where sftp starts.
     private func remoteStart(for connection: SSHConnection) -> String? {
+        // A tab picked again: where its files were.
+        if let name = hostName(of: connection), let saved = tabFolders[name] { return saved }
         guard let set = startFolders[connection.key]?.remote else { return lastFolders[connection.key] }
         if set == "~" { return nil }
         return set.hasPrefix("~/") ? String(set.dropFirst(2)) : set
@@ -301,12 +310,19 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             statusLabel.stringValue = tr("已中斷與 \(connection.destination) 的連線，回到本機終端機。從連線選單再選一次可重新連線。",
                                          "Disconnected from \(connection.destination); back to this Mac’s terminal. Choose it from the connection menu to connect again.")
         }
+        if let name = hostName(of: connection) {
+            tabHosts.removeAll { $0 == name }
+            tabModes[name] = nil
+            tabFolders[name] = nil
+        }
+        rebuildTabs()
         updateServerUI()
     }
 
     private func connectionOpened(_ connection: SSHConnection) {
         // Just connected (not each folder listed since): this Mac's side goes to the folder set for it.
-        if !openedKeys.contains(connection.key) { goToLocalStart(for: connection) }
+        let fresh = !openedKeys.contains(connection.key)
+        if fresh { goToLocalStart(for: connection) }
         openedKeys.insert(connection.key)
         closedKeys.remove(connection.key)
         updateServerUI()
@@ -325,6 +341,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     /// Stops the connection to the server showing: its SSH session ends, which closes it.
     @objc func stopConnection(_ sender: Any?) {
         guard let connection else { return }
+        close(connection)
+    }
+
+    /// Closes a server's connection, and so its tab.
+    private func close(_ connection: SSHConnection) {
         if let session = sessions[connection.key], session.isRunning {
             session.close()   // its ending closes the connection
         } else {
@@ -332,9 +353,94 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
+    // MARK: - Tabs
+
+    private func hostName(of connection: SSHConnection) -> String? {
+        connections.first { $0.value === connection }?.key
+    }
+
+    /// What the server showing was showing, for when its tab is picked again.
+    private func saveTabState() {
+        guard let connection, let name = hostName(of: connection) else { return }
+        tabModes[name] = mode
+        tabFolders[name] = folder
+    }
+
+    private func rebuildTabs() {
+        for view in tabStrip.arrangedSubviews { view.removeFromSuperview() }
+        tabStrip.addArrangedSubview(localTab())
+        for (index, name) in tabHosts.enumerated() { tabStrip.addArrangedSubview(serverTab(index, name)) }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        tabStrip.addArrangedSubview(spacer)
+    }
+
+    private func tabTitle(_ text: String, active: Bool) -> NSTextField {
+        // A label, not a button, so the tab itself takes the mouse: a click picks it, a drag moves it.
+        let title = NSTextField(labelWithString: text)
+        title.font = .systemFont(ofSize: 12, weight: active ? .semibold : .regular)
+        title.textColor = active ? .labelColor : .secondaryLabelColor
+        title.lineBreakMode = .byTruncatingMiddle
+        title.setContentCompressionResistancePriority(.init(200), for: .horizontal)
+        return title
+    }
+
+    /// This Mac's tab: always first, and it can't be closed or moved.
+    private func localTab() -> NSView {
+        let active = connection == nil
+        let chip = TabChip(views: [tabTitle(tr("本機", "This Mac"), active: active)], active: active, movable: false)
+        chip.toolTip = tr("這台 Mac 的終端機", "This Mac’s terminal")
+        chip.onSelect = { [weak self] in self?.showLocal() }
+        return chip
+    }
+
+    private func serverTab(_ index: Int, _ name: String) -> NSView {
+        let connection = connections[name]
+        let active = connection != nil && connection === self.connection
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: tr("關閉", "Close"))!
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))!, target: self, action: #selector(closeTab(_:)))
+        close.isBordered = false
+        close.tag = index
+        close.contentTintColor = .secondaryLabelColor
+        close.toolTip = tr("關閉標籤頁，中斷這個連線", "Close the Tab, Ending This Connection")
+        close.setContentHuggingPriority(.required, for: .horizontal)
+        let chip = TabChip(views: [tabTitle(name, active: active), close], active: active)
+        chip.toolTip = (hosts.first { $0.name == name }?.summary ?? name) + tr("（拖曳可調整順序）", " (drag to reorder)")
+        chip.onSelect = { [weak self] in
+            guard let self, let host = self.hosts.first(where: { $0.name == name }) else { return }
+            self.browse(host: host)
+        }
+        chip.onMove = { [weak self] from, to in self?.moveTab(from: from, to: to) }
+        return chip
+    }
+
+    @objc private func closeTab(_ sender: NSButton) {
+        guard tabHosts.indices.contains(sender.tag), let connection = connections[tabHosts[sender.tag]] else { return }
+        close(connection)
+    }
+
+    private func moveTab(from: Int, to: Int) {
+        guard tabHosts.indices.contains(from), tabHosts.indices.contains(to), from != to else { return rebuildTabs() }
+        tabHosts.insert(tabHosts.remove(at: from), at: to)
+        rebuildTabs()
+    }
+
+    /// ⌃Tab and ⌃⇧Tab: the next tab along, or the one before, going round.
+    @objc func nextTab(_ sender: Any?) { stepTab(1) }
+    @objc func previousTab(_ sender: Any?) { stepTab(-1) }
+
+    private func stepTab(_ step: Int) {
+        let all: [String?] = [nil] + tabHosts.map { Optional($0) }
+        let current = connection.flatMap { hostName(of: $0) }
+        let index = all.firstIndex { $0 == current } ?? 0
+        let next = all[(index + step + all.count) % all.count]
+        if let next, let host = hosts.first(where: { $0.name == next }) { browse(host: host) } else if next == nil { showLocal() }
+    }
+
     /// This Mac's own terminal, with no server: what the window shows when nothing is connected.
     @objc private func showLocal() {
         if connection != nil {
+            saveTabState()
             stopSyncBrowsing(nil)
             connection = nil
             folder = nil
@@ -342,6 +448,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             reloadFiles()
         }
         mode = .ssh
+        rebuildTabs()
     }
 
     /// The connection button's menu: every host, the connected ones marked, then a host typed in,
@@ -396,7 +503,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         _ = add(tr("拷貝 ssh 指令", "Copy the ssh Command"), #selector(copySSHCommand(_:)))
         if Passwords.hasAny(for: connection.key) { _ = add(tr("忘記儲存的密碼", "Forget Saved Passwords"), #selector(forgetPasswords(_:))) }
         if host.typed { _ = add(tr("從清單移除", "Remove from the List"), #selector(removeTypedHost(_:))) }
-        _ = add(tr("停止連線", "Stop the Connection"), #selector(stopConnection(_:)))
+        _ = add(tr("關閉標籤頁（中斷連線）", "Close the Tab (End the Connection)"), #selector(stopConnection(_:)))
     }
 
     @objc private func pickHostFromMenu(_ sender: NSMenuItem) {
@@ -823,27 +930,35 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     // MARK: - Connecting and asking
 
     /// Shows a host's files, starting in the folder last seen there.
+    /// Shows a server: its tab if it has one, as it was left; else a new tab, connecting it.
     private func browse(host: HostItem) {
         let connection = connection(for: host)
         let switching = connection !== self.connection
+        if switching { saveTabState() }
         self.connection = connection
         if switching {
             stopSyncBrowsing(tr("換了主機，已解除同步瀏覽", "Another host: synchronized browsing is off"), beep: false)
-        }
-        if switching {
+            let isNew = !tabHosts.contains(host.name)
+            if isNew {
+                tabHosts.append(host.name)
+                // The folders set for it in the connection settings, read afresh for each new tab.
+                startFolders[connection.key] = host.typed ? (nil, nil) : ConfigFile.startFolders(for: host.name)
+                goToLocalStart(for: connection)
+            }
             folder = nil
             files = []
             reloadFiles()
-            // The folders set for it in the connection settings, read afresh each time it's chosen.
-            startFolders[connection.key] = host.typed ? (nil, nil) : ConfigFile.startFolders(for: host.name)
-            goToLocalStart(for: connection)
+            rebuildTabs()
+            // A tab comes back as it was; a new one keeps the mode showing.
+            let wanted = isNew ? mode : tabModes[host.name] ?? .ssh
+            if mode != wanted { return mode = wanted }   // showMode does the rest
         }
         if mode == .ssh {
             showSession(for: connection)
             updateServerUI()
         } else {
             for session in sessions.values { session.view.isHidden = true }
-            load(switching ? remoteStart(for: connection) : folder, fallBackHome: true)
+            load(folder ?? remoteStart(for: connection), fallBackHome: true)
         }
     }
 
@@ -1129,7 +1244,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         } ?? tr("本機終端機。按一下選擇要連線的主機", "This Mac’s terminal. Click to choose a host to connect to")
         hostButton.setAccessibilityLabel(hostButton.toolTip)
         hostButton.contentTintColor = connected ? .controlAccentColor : .secondaryLabelColor
-        stopButton.isEnabled = connection.map { openedKeys.contains($0.key) } ?? false
         pathField.stringValue = folder ?? ""
         pathField.isEnabled = on
         remoteHeading.stringValue = (syncBrowsing ? "🔒 " : "") + (connection.map { tr("遠端", "Server") + " · " + $0.destination } ?? tr("遠端", "Server"))
@@ -1939,7 +2053,9 @@ extension MainViewController: NSMenuItemValidation {
             menuItem.state = mode == .sftp ? .on : .off
             return sftpAvailable
         case #selector(stopConnection(_:)):
-            return connection.map { openedKeys.contains($0.key) } ?? false
+            return connection != nil
+        case #selector(nextTab(_:)), #selector(previousTab(_:)):
+            return !tabHosts.isEmpty
         case #selector(toggleOptionAsMeta(_:)):
             menuItem.state = TerminalView.optionAsMeta ? .on : .off
             return true

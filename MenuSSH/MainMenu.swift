@@ -11,7 +11,7 @@ enum MainMenu {
 
         let file = submenu(in: main, tr("檔案", "File"))
         add(file, tr("在外部終端機開啟 SSH 連線", "Open an SSH Session in the Terminal App"), #selector(MainViewController.openTerminalHere(_:)), "t", target: controller)
-        add(file, tr("停止連線", "Stop the Connection"), #selector(MainViewController.stopConnection(_:)), "d", target: controller)
+        add(file, tr("關閉標籤頁（中斷連線）", "Close the Tab (End the Connection)"), #selector(MainViewController.stopConnection(_:)), "d", target: controller)
             .keyEquivalentModifierMask = [.command, .option]
         add(file, tr("新增連線設定…", "Add a Connection…"), #selector(MainViewController.addHost(_:)), "", target: controller)
         add(file, tr("管理連線設定…", "Connection Settings…"), #selector(MainViewController.manageConnections(_:)), "K", target: controller)
@@ -42,6 +42,11 @@ enum MainMenu {
         let view = submenu(in: main, tr("顯示方式", "View"))
         add(view, "SSH", #selector(MainViewController.showSSH(_:)), "1", target: controller)
         add(view, "SFTP", #selector(MainViewController.showSFTP(_:)), "2", target: controller)
+        view.addItem(.separator())
+        add(view, tr("下一個標籤頁", "Next Tab"), #selector(MainViewController.nextTab(_:)), "\t", target: controller)
+            .keyEquivalentModifierMask = [.control]
+        add(view, tr("上一個標籤頁", "Previous Tab"), #selector(MainViewController.previousTab(_:)), "\t", target: controller)
+            .keyEquivalentModifierMask = [.control, .shift]
         view.addItem(.separator())
         add(view, tr("顯示或收起傳輸清單", "Show or Hide the Transfers"), #selector(MainViewController.toggleTransfers(_:)), "l", target: controller)
             .keyEquivalentModifierMask = [.command, .option]
