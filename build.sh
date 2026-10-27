@@ -29,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<key>CFBundleExecutable</key><string>MenuSSH</string>
 	<key>CFBundleIconFile</key><string>AppIcon</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>2026.a25</string>
-	<key>CFBundleVersion</key><string>2026.a25</string>
+	<key>CFBundleShortVersionString</key><string>2026.a27</string>
+	<key>CFBundleVersion</key><string>2026.a27</string>
 	<key>CFBundleDevelopmentRegion</key><string>zh_TW</string>
 	<key>LSMinimumSystemVersion</key><string>13.0</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
