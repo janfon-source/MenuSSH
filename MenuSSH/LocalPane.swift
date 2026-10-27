@@ -58,7 +58,9 @@ final class LocalPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMen
                                       button("arrow.up", "上一層資料夾", "Enclosing Folder", #selector(goUp(_:))),
                                       button("house", "家目錄", "Home Folder", #selector(goHome(_:))),
                                       button("folder", "選擇資料夾…", "Choose a Folder…", #selector(chooseFolder(_:))),
-                                      button("arrow.clockwise", "重新整理", "Refresh", #selector(refresh(_:)))])
+                                      button("arrow.clockwise", "重新整理", "Refresh", #selector(refresh(_:))),
+                                      button("arrow.left.circle", "上傳：把選取的項目傳到右邊的遠端資料夾（⌘U）",
+                                             "Upload: the items selected here to the server’s folder on the right (⌘U)", #selector(upload(_:)))])
         bar.spacing = 4
         bar.edgeInsets = NSEdgeInsets(top: 5, left: 8, bottom: 5, right: 6)
 
@@ -276,6 +278,50 @@ final class LocalPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMen
         }
     }
 
+    /// The info window for the item selected: its facts, and its name and permissions to change.
+    @objc func showInfo(_ sender: Any?) {
+        guard actedOn.count == 1, let file = actedOn.first else { return NSSound.beep() }
+        let url = URL(fileURLWithPath: file.path)
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: file.path)) ?? [:]
+        func date(_ key: FileAttributeKey) -> String {
+            (attributes[key] as? Date).map { FileInfoWindow.dateFormatter.string(from: $0) } ?? "—"
+        }
+        let owner = [attributes[.ownerAccountName] as? String, attributes[.groupOwnerAccountName] as? String]
+            .compactMap { $0 }.joined(separator: " / ")
+        let details: [(String, String)] = [
+            (tr("建立日期", "Created"), date(.creationDate)),
+            (tr("修改日期", "Modified"), date(.modificationDate)),
+            (tr("擁有者／群組", "Owner / Group"), owner.isEmpty ? "—" : owner),
+        ]
+        let window = FileInfoWindow(file: file, place: (folder.path as NSString).abbreviatingWithTildeInPath, details: details) { done in
+            DispatchQueue.global().async {
+                let size = SSHConnection.localSize(of: url)
+                DispatchQueue.main.async { done(size) }
+            }
+        }
+        if let keepingOpen { keepingOpen { window.run() } } else { window.run() }
+        guard let changes = window.changes else { return }
+        var path = file.path
+        do {
+            if let name = changes.name {
+                let renamed = folder.appendingPathComponent(name).path
+                try FileManager.default.moveItem(atPath: path, toPath: renamed)
+                path = renamed
+            }
+            if let mode = changes.permissions {
+                try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
+                if changes.recursive, let inside = FileManager.default.enumerator(atPath: path) {
+                    while let item = inside.nextObject() as? String {
+                        try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: (path as NSString).appendingPathComponent(item))
+                    }
+                }
+            }
+        } catch {
+            showError?(tr("無法套用變更", "Couldn’t Make the Changes"), error)
+        }
+        go(to: folder, select: [(path as NSString).lastPathComponent])
+    }
+
     @objc func copyPath(_ sender: Any?) {
         let paths = actedOn.isEmpty ? [folder.path] : actedOn.map(\.path)
         NSPasteboard.general.clearContents()
@@ -333,7 +379,10 @@ final class LocalPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMen
             item("開啟", "Open", #selector(openSelected(_:)))
             item("在 Finder 中顯示", "Show in Finder", #selector(revealInFinder(_:)))
             menu.addItem(.separator())
-            if chosen.count == 1 { item("重新命名…", "Rename…", #selector(rename(_:))) }
+            if chosen.count == 1 {
+                item(chosen[0].isFolder ? "資料夾資訊…" : "檔案資訊…", chosen[0].isFolder ? "Folder Info…" : "File Info…", #selector(showInfo(_:)))
+                item("重新命名…", "Rename…", #selector(rename(_:)))
+            }
             item("移到垃圾桶", "Move to Trash", #selector(moveToTrash(_:)))
             item("拷貝路徑", "Copy Path", #selector(copyPath(_:)))
             menu.addItem(.separator())

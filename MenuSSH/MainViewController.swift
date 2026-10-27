@@ -126,7 +126,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
     private var serverButtons: [NSButton] = []
     /// The dividers among them, hidden with them.
     private var fileDividers: [NSView] = []
-    private var externalTerminalButton: NSButton!
+    private var clearButton: NSButton!
     private var filePane: NSView!
     /// Holds the files and the terminals, one showing at a time.
     private let rightPane = NSView()
@@ -155,9 +155,9 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                                #selector(togglePin(_:)))
         hiddenButton = toolButton("eye.slash", "顯示或隱藏以 . 開頭的隱藏檔（⇧⌘.）", "Show or Hide Hidden Files, Whose Names Start with . (⇧⌘.)",
                                   #selector(toggleHidden(_:)))
-        hostButton = toolButton("server.rack", "選擇連線", "Choose a Connection", #selector(showHostMenu(_:)))
-        externalTerminalButton = toolButton("macwindow.on.rectangle", "在外部的終端機 App 開啟 SSH 連線（⌘T）",
-                                            "Open an SSH Session in the Terminal App (⌘T)", #selector(openTerminalHere(_:)))
+        hostButton = toolButton("network", "選擇連線", "Choose a Connection", #selector(showHostMenu(_:)))
+        clearButton = toolButton("eraser", "清除：清空畫面和回捲紀錄（⌘K）", "Clear: the screen and the scrollback (⌘K)",
+                                 #selector(clearScrollback(_:)))
         reconnectButton = toolButton("arrow.triangle.2.circlepath", "重新連線：結束這個 SSH 連線，再開一個新的（⇧⌘R）",
                                      "Reconnect: end this SSH session and start a new one (⇧⌘R)", #selector(reconnect(_:)))
         modeControl.segmentStyle = .rounded
@@ -172,20 +172,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         syncButton = toolButton("lock.open", "同步瀏覽：鎖定後，在本機或遠端切換資料夾（進入、回上一層、跳到別處），另一邊會跟著切換到對應的資料夾（⌥⌘Y）",
                                 "Synchronized Browsing: once locked, changing folders on this Mac or the server (going in, up, or anywhere) changes the other side to the matching folder (⌥⌘Y)",
                                 #selector(toggleSyncBrowsing(_:)))
-        serverButtons = [
-            toolButton("square.and.arrow.up", "上傳：把左邊本機選取的項目傳到右邊的遠端資料夾（⌘U）；也可以直接拖曳過去",
-                       "Upload: the items selected on this Mac (left) to the server’s folder (right) (⌘U); or drag them across", #selector(upload(_:))),
-            toolButton("square.and.arrow.down", "下載：把右邊遠端選取的項目傳到左邊的本機資料夾（⌘D）；也可以直接拖曳過去",
-                       "Download: the items selected on the server (right) to the folder on this Mac (left) (⌘D); or drag them across", #selector(download(_:))),
-            toolButton("folder.badge.plus", "新增資料夾（⇧⌘N）", "New Folder (⇧⌘N)", #selector(newFolder(_:))),
-            toolButton("trash", "刪除選取的項目（⌘⌫）", "Delete the Selected Items (⌘⌫)", #selector(deleteFiles(_:))),
-            hiddenButton,
-            syncButton,
-        ]
+        serverButtons = [hiddenButton, syncButton]
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         fileDividers = [divider()]
-        var items: [NSView] = [hostButton, divider(), modeControl, divider(), externalTerminalButton, reconnectButton]
+        var items: [NSView] = [hostButton, divider(), modeControl, divider(), clearButton, reconnectButton]
         items.append(fileDividers[0])
         items += serverButtons.map { $0 as NSView }
         items.append(spacer)
@@ -494,16 +485,21 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         if hosts.isEmpty { header(tr("~/.ssh/config 裡還沒有主機", "No hosts in ~/.ssh/config yet")) }
         menu.addItem(.separator())
         _ = add(tr("連線到其他主機…", "Connect to Another Host…"), #selector(connectToTypedHost(_:)))
-        _ = add(tr("新增連線設定…", "Add a Connection…"), #selector(addHost(_:)))
         _ = add(tr("管理連線設定…", "Connection Settings…"), #selector(manageConnections(_:)))
         guard let connection, let host = hosts.first(where: { connections[$0.name] === connection }) else { return }
         menu.addItem(.separator())
         header(host.name)
-        _ = add(tr("在\(TerminalApp.current.title)開啟 SSH 連線", "Open an SSH Session in \(TerminalApp.current.title)"), #selector(openTerminalHere(_:)))
         _ = add(tr("拷貝 ssh 指令", "Copy the ssh Command"), #selector(copySSHCommand(_:)))
         if Passwords.hasAny(for: connection.key) { _ = add(tr("忘記儲存的密碼", "Forget Saved Passwords"), #selector(forgetPasswords(_:))) }
         if host.typed { _ = add(tr("從清單移除", "Remove from the List"), #selector(removeTypedHost(_:))) }
         _ = add(tr("關閉標籤頁（中斷連線）", "Close the Tab (End the Connection)"), #selector(stopConnection(_:)))
+    }
+
+    /// From the menu bar icon's menu: the host's tab, connecting it.
+    func connect(toHost name: String) {
+        reloadHosts()
+        guard let host = hosts.first(where: { $0.name == name }) else { return }
+        browse(host: host)
     }
 
     @objc private func pickHostFromMenu(_ sender: NSMenuItem) {
@@ -550,6 +546,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         for button in serverButtons { button.isHidden = ssh }
         for divider in fileDividers { divider.isHidden = ssh }
         reconnectButton.isHidden = !ssh
+        clearButton.isHidden = !ssh
         pathField.isHidden = ssh
         for session in sessions.values { session.view.isHidden = !ssh || session !== self.session }
         if ssh {
@@ -637,7 +634,11 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
-    @objc func clearScrollback(_ sender: Any?) { session?.view.clearScrollback(sender) }
+    /// Clears the screen and the scrollback, as Terminal's ⌘K does.
+    @objc func clearScrollback(_ sender: Any?) {
+        session?.clear()
+        if let session { view.window?.makeFirstResponder(session.view) }
+    }
 
     @objc func biggerText(_ sender: Any?) { setFontSize(TerminalView.fontSize + 1) }
     @objc func smallerText(_ sender: Any?) { setFontSize(TerminalView.fontSize - 1) }
@@ -729,6 +730,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
             barButton("folder", "前往資料夾：上層資料夾、最近去過的資料夾，或輸入路徑（⇧⌘G）",
                       "Go to a Folder: the ones above, recent ones, or a path typed in (⇧⌘G)", #selector(showRemoteFolderMenu(_:))),
             barButton("arrow.clockwise", "重新整理（⌘R）", "Refresh (⌘R)", #selector(refresh(_:))),
+            barButton("arrow.right.circle", "下載：把選取的項目傳到左邊的本機資料夾（⌘D）",
+                      "Download: the items selected here to the folder on this Mac on the left (⌘D)", #selector(download(_:))),
         ]
         let bar = NSStackView(views: [remoteHeading, pathField] + remoteBarButtons)
         bar.spacing = 4
@@ -1246,8 +1249,7 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         hostButton.contentTintColor = connected ? .controlAccentColor : .secondaryLabelColor
         pathField.stringValue = folder ?? ""
         pathField.isEnabled = on
-        remoteHeading.stringValue = (syncBrowsing ? "🔒 " : "") + (connection.map { tr("遠端", "Server") + " · " + $0.destination } ?? tr("遠端", "Server"))
-        externalTerminalButton.isEnabled = connection != nil
+        remoteHeading.stringValue = (syncBrowsing ? "🔒 " : "") + tr("遠端", "Server")
         reconnectButton.isEnabled = session?.hasStarted == true
         filePane.isHidden = mode == .ssh
         if mode == .ssh {
@@ -1359,23 +1361,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
                                             measure: { _ in SSHConnection.localSize(of: url) }) { [weak self] error in
                 if error == nil { self?.statusLabel.stringValue = tr("已上傳 \(name) 的修改", "Uploaded the changes to \(name)") }
             }])
-        }
-    }
-
-    // MARK: - Terminal
-
-    @objc func openTerminalHere(_ sender: Any?) {
-        guard let connection else { return }
-        let folder = actedOnFiles.count == 1 && actedOnFiles[0].isFolder && sender is NSMenuItem ? actedOnFiles[0].path : self.folder
-        openTerminal(connection, folder: folder)
-    }
-
-    func openTerminal(_ connection: SSHConnection, folder: String?) {
-        do {
-            try TerminalApp.current.open(connection, folder: folder)
-            if !inPinnedWindow { popover?.performClose(nil) }
-        } catch {
-            showError(tr("無法開啟終端機", "Couldn’t Open the Terminal"), error)
         }
     }
 
@@ -1587,6 +1572,48 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         perform(tr("正在搬移…", "Moving…"), { try connection.sftp(commands, $0) }) { [weak self] result in
             if case .failure(let error) = result { self?.showError(tr("無法搬移", "Couldn’t Move Them"), error) }
             self?.load(folder, quietly: true)
+        }
+    }
+
+    /// The info window for the item selected on the server (or, with the focus there, on this Mac).
+    @objc func showInfo(_ sender: Any?) {
+        if forLocal(sender) { return localPane.showInfo(sender) }
+        guard let connection, let folder, actedOnFiles.count == 1, let file = actedOnFiles.first else { return NSSound.beep() }
+        let details: [(String, String)] = [
+            (tr("修改日期", "Modified"), file.modified.map { FileInfoWindow.dateFormatter.string(from: $0) } ?? "—"),
+            (tr("擁有者（UID）", "Owner (UID)"), file.owner.isEmpty ? "—" : file.owner),
+        ]
+        let window = FileInfoWindow(file: file, place: connection.destination + ":" + SSHConnection.parent(of: file.path),
+                                    details: details) { done in
+            DispatchQueue.global().async {
+                let size = connection.size(of: file.path, Cancellation())
+                DispatchQueue.main.async { done(size) }
+            }
+        }
+        keepingPopoverOpen { window.run() }
+        guard let changes = window.changes else { return }
+        let parent = SSHConnection.parent(of: file.path)
+        perform(tr("正在套用…", "Applying…"), { cancel -> String in
+            var path = file.path
+            if let name = changes.name {
+                let renamed = SSHConnection.join(parent, name)
+                try connection.rename(path, to: renamed, cancel)
+                path = renamed
+            }
+            if let mode = changes.permissions {
+                let octal = String(mode, radix: 8)
+                if changes.recursive {
+                    // An absolute path, so no -- (BSD's chmod would take it for a file name).
+                    try connection.shell("chmod -R \(octal) " + SSHConnection.shellQuote(path), cancel)
+                } else {
+                    try connection.sftp(["chmod \(octal) " + SSHConnection.quote(path)], cancel)
+                }
+            }
+            return (path as NSString).lastPathComponent
+        }) { [weak self] result in
+            if case .failure(let error) = result { self?.showError(tr("無法套用變更", "Couldn’t Make the Changes"), error) }
+            let name = (try? result.get()) ?? file.name
+            self?.load(folder, select: [name], quietly: true)
         }
     }
 
@@ -1903,17 +1930,8 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
 
     @objc func showMoreMenu(_ sender: NSButton) {
         let menu = NSMenu()
-        add(menu, tr("新增連線設定…", "Add a Connection…"), #selector(addHost(_:)))
         add(menu, tr("管理連線設定…", "Connection Settings…"), #selector(manageConnections(_:)), key: "K")
         add(menu, tr("用文字編輯器開啟 ~/.ssh/config", "Open ~/.ssh/config in a Text Editor"), #selector(editConfig(_:)))
-        menu.addItem(.separator())
-        let terminals = NSMenu()
-        for app in TerminalApp.installed {
-            let item = add(terminals, app.title, #selector(selectTerminal(_:)))
-            item.representedObject = app.rawValue
-            item.state = app == TerminalApp.current ? .on : .off
-        }
-        menu.addItem(withTitle: tr("SSH 連線開在", "Open SSH Sessions In"), action: nil, keyEquivalent: "").submenu = terminals
         menu.addItem(.separator())
         add(menu, tr("恢復預設視窗大小", "Restore Default Window Size"), #selector(resetSize(_:)))
         let themes = NSMenu()
@@ -1952,11 +1970,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
         item.target = self
         return item
-    }
-
-    @objc private func selectTerminal(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let app = TerminalApp(rawValue: raw) else { return }
-        TerminalApp.current = app
     }
 
     @objc private func selectTheme(_ sender: NSMenuItem) {
@@ -2022,16 +2035,16 @@ extension MainViewController: NSMenuDelegate {
             item("下載", "Download", #selector(download(_:)))
             item("下載到…", "Download To…", #selector(downloadTo(_:)))
             menu.addItem(.separator())
-            if chosen.count == 1 { item("重新命名…", "Rename…", #selector(renameFile(_:))) }
+            if chosen.count == 1 {
+                item(chosen[0].isFolder ? "資料夾資訊…" : "檔案資訊…", chosen[0].isFolder ? "Folder Info…" : "File Info…", #selector(showInfo(_:)))
+                item("重新命名…", "Rename…", #selector(renameFile(_:)))
+            }
             item("刪除…", "Delete…", #selector(deleteFiles(_:)))
             item("拷貝路徑", "Copy Path", #selector(copyPath(_:)))
             menu.addItem(.separator())
         }
         item("上傳到這裡…", "Upload Here…", #selector(upload(_:)))
         item("新增資料夾…", "New Folder…", #selector(newFolder(_:)))
-        item(chosen.count == 1 && chosen[0].isFolder ? "在終端機開啟這個資料夾" : "在終端機開啟目前的資料夾",
-             chosen.count == 1 && chosen[0].isFolder ? "Open This Folder in the Terminal" : "Open This Folder in the Terminal",
-             #selector(openTerminalHere(_:)))
         item("重新整理", "Refresh", #selector(refresh(_:)))
     }
 }
@@ -2044,7 +2057,7 @@ extension MainViewController: NSMenuItemValidation {
             switch menuItem.action {
             case #selector(deleteFiles(_:)), #selector(openSelected(_:)), #selector(copyPath(_:)):
                 return !localPane.actedOn.isEmpty
-            case #selector(renameFile(_:)):
+            case #selector(renameFile(_:)), #selector(showInfo(_:)):
                 return localPane.actedOn.count == 1
             case #selector(refresh(_:)), #selector(goUp(_:)), #selector(goHome(_:)), #selector(newFolder(_:)):
                 return true
@@ -2074,8 +2087,6 @@ extension MainViewController: NSMenuItemValidation {
             return true
         case #selector(reconnect(_:)), #selector(clearScrollback(_:)):
             return mode == .ssh && session?.hasStarted == true
-        case #selector(openTerminalHere(_:)):
-            return connection != nil
         case #selector(goHome(_:)), #selector(refresh(_:)), #selector(upload(_:)),
              #selector(newFolder(_:)), #selector(goToFolder(_:)), #selector(toggleHidden(_:)):
             return files
@@ -2083,7 +2094,7 @@ extension MainViewController: NSMenuItemValidation {
             return files && folder != "/"
         case #selector(download(_:)), #selector(downloadTo(_:)), #selector(deleteFiles(_:)), #selector(copyPath(_:)), #selector(openSelected(_:)):
             return files && !actedOnFiles.isEmpty
-        case #selector(renameFile(_:)):
+        case #selector(renameFile(_:)), #selector(showInfo(_:)):
             return files && actedOnFiles.count == 1
         case #selector(stopTransfers(_:)):
             return transferQueue.hasActive

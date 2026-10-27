@@ -209,15 +209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showStatusMenu() {
         let menu = NSMenu()
         menu.addItem(withTitle: tr("開啟隨手SSH", "Open MenuSSH"), action: #selector(openFromMenu), keyEquivalent: "").target = self
-        // Every Host, straight into a Terminal window, without opening the popover first.
+        // Every Host, connected in a tab of the window's own.
         let hosts = SSHConfig.hosts()
         if !hosts.isEmpty {
             menu.addItem(.separator())
-            let header = NSMenuItem(title: tr("以\(TerminalApp.current.title)連線", "Connect in \(TerminalApp.current.title)"), action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: tr("連線", "Connect"), action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
             for host in hosts {
-                let item = menu.addItem(withTitle: host.alias, action: #selector(openTerminal(_:)), keyEquivalent: "")
+                let item = menu.addItem(withTitle: host.alias, action: #selector(connectTo(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = host.alias
                 item.toolTip = host.summary
@@ -233,8 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func openFromMenu() { showPopover() }
 
-    @objc private func openTerminal(_ sender: NSMenuItem) {
+    @objc private func connectTo(_ sender: NSMenuItem) {
         guard let alias = sender.representedObject as? String else { return }
-        main.openTerminal(SSHConnection(destination: alias), folder: nil)
+        showPopover()
+        main.connect(toHost: alias)
     }
 }

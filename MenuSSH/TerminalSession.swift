@@ -62,7 +62,7 @@ final class TerminalSession {
         var name: String?, directory: String?
         let command: [String]
         if let connection {
-            command = TerminalApp.command(for: connection, folder: folder)
+            command = SSHCommand.arguments(for: connection, folder: folder)
         } else {
             let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil }
                 ?? Self.loginShell ?? "/bin/zsh"
@@ -110,6 +110,18 @@ final class TerminalSession {
         emulator.feed("\r\n\u{1B}[31m" + message.replacingOccurrences(of: "\n", with: "\r\n") + "\u{1B}[0m\r\n\u{1B}[2m"
                       + tr("按 Return 再試一次。", "Press Return to try again.") + "\u{1B}[0m\r\n")
         view.outputArrived()
+    }
+
+    /// Clears the scrollback, then asks the program for a clean screen with ⌃L: a shell clears it
+    /// and shows its prompt at the top, as after `clear`; a full-screen program just redraws.
+    func clear() {
+        view.clearScrollback(nil)
+        if isRunning {
+            terminal?.write([0x0C])
+        } else {
+            emulator.feed("\u{1B}[H\u{1B}[2J")
+            view.outputArrived()
+        }
     }
 
     /// The shell set for this account (System Settings → Users & Groups), as Terminal uses.

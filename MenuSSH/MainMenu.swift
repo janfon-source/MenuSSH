@@ -10,10 +10,8 @@ enum MainMenu {
         app.addItem(withTitle: tr("結束隨手SSH", "Quit MenuSSH"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let file = submenu(in: main, tr("檔案", "File"))
-        add(file, tr("在外部終端機開啟 SSH 連線", "Open an SSH Session in the Terminal App"), #selector(MainViewController.openTerminalHere(_:)), "t", target: controller)
         add(file, tr("關閉標籤頁（中斷連線）", "Close the Tab (End the Connection)"), #selector(MainViewController.stopConnection(_:)), "d", target: controller)
             .keyEquivalentModifierMask = [.command, .option]
-        add(file, tr("新增連線設定…", "Add a Connection…"), #selector(MainViewController.addHost(_:)), "", target: controller)
         add(file, tr("管理連線設定…", "Connection Settings…"), #selector(MainViewController.manageConnections(_:)), "K", target: controller)
         add(file, tr("用文字編輯器開啟 ~/.ssh/config", "Open ~/.ssh/config in a Text Editor"), #selector(MainViewController.editConfig(_:)), "", target: controller)
         file.addItem(.separator())
@@ -22,6 +20,7 @@ enum MainMenu {
         add(file, tr("下載", "Download"), #selector(MainViewController.download(_:)), "d", target: controller)
         add(file, tr("下載到…", "Download To…"), #selector(MainViewController.downloadTo(_:)), "D", target: controller)
         add(file, tr("新增資料夾…", "New Folder…"), #selector(MainViewController.newFolder(_:)), "N", target: controller)
+        add(file, tr("顯示資訊", "Get Info"), #selector(MainViewController.showInfo(_:)), "i", target: controller)
         add(file, tr("重新命名…", "Rename…"), #selector(MainViewController.renameFile(_:)), "", target: controller)
         add(file, tr("刪除…", "Delete…"), #selector(MainViewController.deleteFiles(_:)), "\u{8}", target: controller)
         add(file, tr("停止傳輸", "Stop Transfers"), #selector(MainViewController.stopTransfers(_:)), ".", target: controller)
@@ -53,7 +52,7 @@ enum MainMenu {
 
         let terminal = submenu(in: main, tr("終端機", "Terminal"))
         add(terminal, tr("重新連線", "Reconnect"), #selector(MainViewController.reconnect(_:)), "R", target: controller)
-        add(terminal, tr("清除回捲紀錄", "Clear Scrollback"), #selector(MainViewController.clearScrollback(_:)), "k", target: controller)
+        add(terminal, tr("清除", "Clear"), #selector(MainViewController.clearScrollback(_:)), "k", target: controller)
         terminal.addItem(.separator())
         add(terminal, tr("放大字體", "Bigger"), #selector(MainViewController.biggerText(_:)), "+", target: controller)
         add(terminal, tr("放大字體", "Bigger"), #selector(MainViewController.biggerText(_:)), "=", target: controller).isHidden = true
