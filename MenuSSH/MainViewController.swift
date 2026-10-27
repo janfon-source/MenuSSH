@@ -191,7 +191,6 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         pathField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         pathField.lineBreakMode = .byTruncatingHead
         pathField.usesSingleLineMode = true
-        pathField.heightAnchor.constraint(equalToConstant: 22).isActive = true
         pathField.cell?.isScrollable = true
         pathField.delegate = self
         pathField.target = self
@@ -724,16 +723,15 @@ final class MainViewController: NSViewController, NSTableViewDataSource, NSTable
         remoteHeading.textColor = .secondaryLabelColor
         remoteHeading.setContentHuggingPriority(.required, for: .horizontal)
         remoteHeading.lineBreakMode = .byTruncatingTail
+        // Mirrored from the left side's: the download arrow points at it, the path at the far edge.
         remoteBarButtons = [
-            barButton("arrow.up", "上一層資料夾（⌘↑）", "Enclosing Folder (⌘↑)", #selector(goUp(_:))),
-            barButton("house", "家目錄（⇧⌘H）", "Home Folder (⇧⌘H)", #selector(goHome(_:))),
+            barButton("arrowshape.left", "下載：把選取的項目傳到左邊的本機資料夾（⌘D）",
+                      "Download: the items selected here to the folder on this Mac on the left (⌘D)", #selector(download(_:))),
             barButton("folder", "前往資料夾：上層資料夾、最近去過的資料夾，或輸入路徑（⇧⌘G）",
                       "Go to a Folder: the ones above, recent ones, or a path typed in (⇧⌘G)", #selector(showRemoteFolderMenu(_:))),
             barButton("arrow.clockwise", "重新整理（⌘R）", "Refresh (⌘R)", #selector(refresh(_:))),
-            barButton("arrow.right.circle", "下載：把選取的項目傳到左邊的本機資料夾（⌘D）",
-                      "Download: the items selected here to the folder on this Mac on the left (⌘D)", #selector(download(_:))),
         ]
-        let bar = NSStackView(views: [remoteHeading, pathField] + remoteBarButtons)
+        let bar = NSStackView(views: remoteBarButtons + [PathBar(label: remoteHeading, field: pathField)])
         bar.spacing = 4
         bar.edgeInsets = NSEdgeInsets(top: 5, left: 8, bottom: 5, right: 8)
         bar.setHuggingPriority(.required, for: .vertical)

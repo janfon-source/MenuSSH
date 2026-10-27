@@ -49,17 +49,14 @@ final class LocalPane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMen
         pathField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         pathField.lineBreakMode = .byTruncatingHead
         pathField.usesSingleLineMode = true
-        pathField.heightAnchor.constraint(equalToConstant: 22).isActive = true
         pathField.cell?.isScrollable = true
         pathField.target = self
         pathField.action = #selector(goToTyped(_:))
         pathField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let bar = NSStackView(views: [heading, pathField,
-                                      button("arrow.up", "上一層資料夾", "Enclosing Folder", #selector(goUp(_:))),
-                                      button("house", "家目錄", "Home Folder", #selector(goHome(_:))),
+        let bar = NSStackView(views: [PathBar(label: heading, field: pathField),
                                       button("folder", "選擇資料夾…", "Choose a Folder…", #selector(chooseFolder(_:))),
                                       button("arrow.clockwise", "重新整理", "Refresh", #selector(refresh(_:))),
-                                      button("arrow.left.circle", "上傳：把選取的項目傳到右邊的遠端資料夾（⌘U）",
+                                      button("arrowshape.right", "上傳：把選取的項目傳到右邊的遠端資料夾（⌘U）",
                                              "Upload: the items selected here to the server’s folder on the right (⌘U)", #selector(upload(_:)))])
         bar.spacing = 4
         bar.edgeInsets = NSEdgeInsets(top: 5, left: 8, bottom: 5, right: 6)
